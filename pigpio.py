@@ -1128,6 +1128,8 @@ class _callback_thread(threading.Thread):
       self.event_bits = 0
       self.callbacks = []
       self.events = []
+      self.host = host
+      self.port = port
       self.sl.s = socket.create_connection((host, port), None)
       self.lastLevel = _pigpio_command(self.sl,  _PI_CMD_BR1, 0, 0)
       self.handle = _u2i(_pigpio_command(self.sl, _PI_CMD_NOIB, 0, 0))
@@ -1191,7 +1193,11 @@ class _callback_thread(threading.Thread):
       buf = bytes()
       while self.go:
 
-         buf += self.sl.s.recv(RECV_SIZ)
+         try:
+            buf += self.sl.s.recv(RECV_SIZ)
+         except:
+            self.sl.s.close()
+            self.sl.s = socket.create_connection((self.host, self.port), None)
          offset = 0
 
          while self.go and (len(buf) - offset) >= MSG_SIZ:
@@ -5088,8 +5094,9 @@ class pi():
          exit()
       ...
       """
-      self.connected = True
 
+      self.stopped = False
+      self.connected = False
       self.sl = _socklock()
       self._notify  = None
 
@@ -5101,11 +5108,45 @@ class pi():
       self._host = host
       self._port = port
 
+      threading.Thread(target=self.connect_loop, args=(host, port, show_errors)).start()
+
+   def connect_loop(self, host, port, show_errors):
+      while True:
+         if self.stopped:
+            break
+
+         if not self.connected:
+            self.connected = True
+            self.connect(host, port, show_errors)
+
+         if self.connected:
+            try:
+               self.sl.s.recv(2)
+            except socket.timeout:
+               continue
+            except:
+               try:
+                  self.sl.s.close()
+               except:
+                  pass
+               self.connected = False
+
+   def connect(self, host, port, show_errors):
       try:
          self.sl.s = socket.create_connection((host, port), None)
 
          # Disable the Nagle algorithm.
          self.sl.s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+         # Enable Keepalive
+         self.sl.s.settimeout(5.0)
+         self.sl.s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+         # overrides value (in seconds) shown by sysctl net.ipv4.tcp_keepalive_time
+         self.sl.s.setsockopt(socket.SOL_TCP, socket.TCP_KEEPIDLE, 10)
+         # overrides value shown by sysctl net.ipv4.tcp_keepalive_probes
+         self.sl.s.setsockopt(socket.SOL_TCP, socket.TCP_KEEPCNT, 4)
+         # overrides value shown by sysctl net.ipv4.tcp_keepalive_intvl
+         self.sl.s.setsockopt(socket.SOL_TCP, socket.TCP_KEEPINTVL, 5)
 
          self._notify = _callback_thread(self.sl, host, port)
 
@@ -5137,11 +5178,11 @@ class pi():
 
             print(_except_a.format(s))
             if exception == 1:
-                print(_except_1)
+               print(_except_1)
             elif exception == 2:
-                print(_except_2)
+               print(_except_2)
             else:
-                print(_except_3)
+               print(_except_3)
             print(_except_z)
 
    def __repr__(self):
@@ -5155,6 +5196,7 @@ class pi():
       ...
       """
 
+      self.stopped = True
       self.connected = False
 
       if self._notify is not None:
